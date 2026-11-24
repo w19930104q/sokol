@@ -14,6 +14,7 @@ if (NOT BACKEND_MOCK_ONLY)
         sokol_audio_test.c
         sokol_debugtext_test.c
         sokol_fetch_test.c
+        sokol_framebuffer_test.c
         sokol_gfx_test.c
         sokol_gl_test.c
         sokol_shape_test.c
