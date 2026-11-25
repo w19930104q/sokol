@@ -2215,6 +2215,10 @@ EM_JS(void, sfetch_js_send_get_request, (uint32_t slot_id, const char* path_cstr
     fetch(path_str, { method: 'GET', headers }).then((response) => {
         if (response.ok) {
             response.arrayBuffer().then((data) => {
+                /* drop late data if the request was cancelled and its slot reused */
+                if (!__sfetch_emsc_slot_alive(slot_id)) {
+                    return;
+                }
                 const u8_data = new Uint8Array(data);
                 if (u8_data.length <= buf_size) {
                     HEAPU8.set(u8_data, buf_ptr);
@@ -2239,6 +2243,19 @@ EM_JS(void, sfetch_js_send_get_request, (uint32_t slot_id, const char* path_cstr
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* return true if slot_id still identifies a live request (same generation),
+   lets the JS side drop late responses of a cancelled or reused request
+   before touching the captured heap buffer */
+EMSCRIPTEN_KEEPALIVE bool _sfetch_emsc_slot_alive(uint32_t slot_id) {
+    _sfetch_t* ctx = _sfetch_ctx();
+    if (ctx && ctx->valid) {
+        _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
+        return item && (item->handle.id == slot_id);
+    }
+    return false;
+}
+
 void _sfetch_emsc_send_get_request(uint32_t slot_id, _sfetch_item_t* item) {
     if ((item->buffer.ptr == 0) || (item->buffer.size == 0)) {
         item->thread.error_code = SFETCH_ERROR_NO_BUFFER;
@@ -2264,76 +2281,66 @@ void _sfetch_emsc_send_get_request(uint32_t slot_id, _sfetch_item_t* item) {
 /* called by JS when an initial HEAD request finished successfully (only when streaming chunks) */
 EMSCRIPTEN_KEEPALIVE void _sfetch_emsc_head_response(uint32_t slot_id, uint32_t content_length) {
     _sfetch_t* ctx = _sfetch_ctx();
-    if (ctx && ctx->valid) {
+    if (ctx && ctx->valid && _sfetch_emsc_slot_alive(slot_id)) {
         _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
-        if (item) {
-            SOKOL_ASSERT(item->buffer.ptr && (item->buffer.size > 0));
-            item->thread.content_size = content_length;
-            _sfetch_emsc_send_get_request(slot_id, item);
-        }
+        SOKOL_ASSERT(item->buffer.ptr && (item->buffer.size > 0));
+        item->thread.content_size = content_length;
+        _sfetch_emsc_send_get_request(slot_id, item);
     }
 }
 
 /* called by JS when a followup GET request finished successfully */
 EMSCRIPTEN_KEEPALIVE void _sfetch_emsc_get_response(uint32_t slot_id, uint32_t range_fetched_size, uint32_t content_fetched_size) {
     _sfetch_t* ctx = _sfetch_ctx();
-    if (ctx && ctx->valid) {
+    if (ctx && ctx->valid && _sfetch_emsc_slot_alive(slot_id)) {
         _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
-        if (item) {
-            item->thread.fetched_size = content_fetched_size;
-            item->thread.fetched_offset += content_fetched_size;
-            item->thread.http_range_offset += range_fetched_size;
-            if (item->chunk_size == 0) {
-                item->thread.finished = true;
-            } else if (item->thread.http_range_offset >= item->thread.content_size) {
-                item->thread.finished = true;
-            }
-            _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
+        item->thread.fetched_size = content_fetched_size;
+        item->thread.fetched_offset += content_fetched_size;
+        item->thread.http_range_offset += range_fetched_size;
+        if (item->chunk_size == 0) {
+            item->thread.finished = true;
+        } else if (item->thread.http_range_offset >= item->thread.content_size) {
+            item->thread.finished = true;
         }
+        _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
     }
 }
 
 /* called by JS when an error occurred */
 EMSCRIPTEN_KEEPALIVE void _sfetch_emsc_failed_http_status(uint32_t slot_id, uint32_t http_status) {
     _sfetch_t* ctx = _sfetch_ctx();
-    if (ctx && ctx->valid) {
+    if (ctx && ctx->valid && _sfetch_emsc_slot_alive(slot_id)) {
         _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
-        if (item) {
-            if (http_status == 404) {
-                item->thread.error_code = SFETCH_ERROR_FILE_NOT_FOUND;
-            } else {
-                item->thread.error_code = SFETCH_ERROR_INVALID_HTTP_STATUS;
-            }
-            item->thread.failed = true;
-            item->thread.finished = true;
-            _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
+        if (http_status == 404) {
+            item->thread.error_code = SFETCH_ERROR_FILE_NOT_FOUND;
+        } else {
+            item->thread.error_code = SFETCH_ERROR_INVALID_HTTP_STATUS;
         }
+        item->thread.failed = true;
+        item->thread.finished = true;
+        _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
     }
 }
 
 EMSCRIPTEN_KEEPALIVE void _sfetch_emsc_failed_buffer_too_small(uint32_t slot_id) {
     _sfetch_t* ctx = _sfetch_ctx();
-    if (ctx && ctx->valid) {
+    if (ctx && ctx->valid && _sfetch_emsc_slot_alive(slot_id)) {
         _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
-        if (item) {
-            item->thread.error_code = SFETCH_ERROR_BUFFER_TOO_SMALL;
-            item->thread.failed = true;
-            item->thread.finished = true;
-            _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
-        }
+        item->thread.error_code = SFETCH_ERROR_BUFFER_TOO_SMALL;
+        item->thread.failed = true;
+        item->thread.finished = true;
+        _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
     }
 }
 
 EMSCRIPTEN_KEEPALIVE void _sfetch_emsc_failed_other(uint32_t slot_id) {
     _sfetch_t* ctx = _sfetch_ctx();
-    if (ctx && ctx->valid) {
+    if (ctx && ctx->valid && _sfetch_emsc_slot_alive(slot_id)) {
         _sfetch_item_t* item = _sfetch_pool_item_lookup(&ctx->pool, slot_id);
-        if (item) {
-            item->thread.error_code = SFETCH_ERROR_JS_OTHER;
-            item->thread.failed = true;
-            item->thread.finished = true;
-            _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
-        }
+        item->thread.error_code = SFETCH_ERROR_JS_OTHER;
+        item->thread.failed = true;
+        item->thread.finished = true;
+        _sfetch_ring_enqueue(&ctx->chn[item->channel].user_outgoing, slot_id);
     }
 }
 

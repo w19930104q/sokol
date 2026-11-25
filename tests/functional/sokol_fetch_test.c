@@ -205,6 +205,26 @@ UTEST(sokol_fetch, lookup_item) {
     sfetch_shutdown();
 }
 
+UTEST(sokol_fetch, lookup_item_generation_reuse) {
+    sfetch_setup(&(sfetch_desc_t){0});
+    _sfetch_pool_t pool = {0};
+    _sfetch_pool_init(&pool, 4);
+    /* alloc and free a slot, then alloc again so the same slot gets a new generation */
+    uint32_t old_id = _sfetch_pool_item_alloc(&pool, &(sfetch_request_t){ .path="old" });
+    _sfetch_pool_item_free(&pool, old_id);
+    uint32_t new_id = _sfetch_pool_item_alloc(&pool, &(sfetch_request_t){ .path="new" });
+    /* both ids address the same pool slot, but carry a different generation */
+    T(_sfetch_slot_index(old_id) == _sfetch_slot_index(new_id));
+    T(old_id != new_id);
+    /* the new generation resolves, the stale generation must be rejected even
+       though the slot is occupied again (identity is not slot/address based) */
+    T(_sfetch_pool_item_lookup(&pool, new_id) == &pool.items[1]);
+    T(0 == _sfetch_pool_item_lookup(&pool, old_id));
+    T(pool.items[1].handle.id == new_id);
+    _sfetch_pool_discard(&pool);
+    sfetch_shutdown();
+}
+
 UTEST(sokol_fetch, ring_init_discard) {
     sfetch_setup(&(sfetch_desc_t){0});
     _sfetch_ring_t ring = {0};
