@@ -5484,6 +5484,227 @@ UTEST(sokol_gfx, max_pass_attachments) {
     sg_shutdown();
 }
 
+// a stale depth-stencil attachment handle must stay rejected after its pool
+// slot is reused, and the rejection must happen before the backend pass starts
+static void test_begin_pass_stale_depth_attachment(int* utest_result) {
+    // 8x8 color and depth-stencil attachments
+    sg_image color_img = sg_make_image(&(sg_image_desc){
+        .usage.color_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_RGBA8,
+    });
+    sg_image depth_img = sg_make_image(&(sg_image_desc){
+        .usage.depth_stencil_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_DEPTH,
+    });
+    sg_view color_view = sg_make_view(&(sg_view_desc){
+        .color_attachment.image = color_img,
+    });
+    sg_view depth_view = sg_make_view(&(sg_view_desc){
+        .depth_stencil_attachment.image = depth_img,
+    });
+
+    // first pass with the valid attachments is accepted
+    reset_log_items();
+    sg_enable_stats();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    T(num_log_called == 0);
+    T(sg_query_stats().cur_frame.num_passes == 1);
+    sg_commit();
+
+    // delete the depth attachment, then rebuild a same-size one (same pool slot,
+    // new generation counter)
+    sg_destroy_view(depth_view);
+    sg_destroy_image(depth_img);
+    T(sg_query_view_state(depth_view) == SG_RESOURCESTATE_INVALID);
+    sg_image new_depth_img = sg_make_image(&(sg_image_desc){
+        .usage.depth_stencil_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_DEPTH,
+    });
+    sg_view new_depth_view = sg_make_view(&(sg_view_desc){
+        .depth_stencil_attachment.image = new_depth_img,
+    });
+    // the new view must reuse the slot, but carry a different generation
+    T((depth_view.id & 0xFFFF) == (new_depth_view.id & 0xFFFF));
+    T(depth_view.id != new_depth_view.id);
+
+    // second pass with the stale depth handle is rejected, the first completed
+    // pass is not affected, and the pass bookkeeping stays balanced
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    T(num_log_called > 0);
+    T(sg_query_stats().cur_frame.num_passes == 1);
+    sg_commit();
+
+    // third pass with the new handle is accepted again
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = new_depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 0);
+
+    sg_destroy_view(new_depth_view);
+    sg_destroy_image(new_depth_img);
+    sg_destroy_view(color_view);
+    sg_destroy_image(color_img);
+    sg_shutdown();
+}
+
+UTEST(sokol_gfx, begin_pass_stale_depth_attachment) {
+    setup(&(sg_desc){0});
+    test_begin_pass_stale_depth_attachment(utest_result);
+}
+
+// the same rejection must be reported outside the validation layer, so the
+// behaviour is identical with validation disabled (and in release builds)
+UTEST(sokol_gfx, begin_pass_stale_depth_attachment_no_validation) {
+    setup(&(sg_desc){ .disable_validation = true });
+    sg_image color_img = sg_make_image(&(sg_image_desc){
+        .usage.color_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_RGBA8,
+    });
+    sg_image depth_img = sg_make_image(&(sg_image_desc){
+        .usage.depth_stencil_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_DEPTH,
+    });
+    sg_view color_view = sg_make_view(&(sg_view_desc){
+        .color_attachment.image = color_img,
+    });
+    sg_view depth_view = sg_make_view(&(sg_view_desc){
+        .depth_stencil_attachment.image = depth_img,
+    });
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 0);
+
+    sg_destroy_view(depth_view);
+    sg_destroy_image(depth_img);
+    sg_image new_depth_img = sg_make_image(&(sg_image_desc){
+        .usage.depth_stencil_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_DEPTH,
+    });
+    sg_view new_depth_view = sg_make_view(&(sg_view_desc){
+        .depth_stencil_attachment.image = new_depth_img,
+    });
+    T((depth_view.id & 0xFFFF) == (new_depth_view.id & 0xFFFF));
+    T(depth_view.id != new_depth_view.id);
+
+    // the stale handle is rejected by the validation-layer-independent check
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 1);
+    T(log_items[0] == SG_LOGITEM_BEGINPASS_ATTACHMENTS_ALIVE);
+
+    // the new handle works
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = new_depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 0);
+
+    sg_destroy_view(new_depth_view);
+    sg_destroy_image(new_depth_img);
+    sg_destroy_view(color_view);
+    sg_destroy_image(color_img);
+    sg_shutdown();
+}
+
+// a stale color attachment handle is rejected by the same check and error code
+UTEST(sokol_gfx, begin_pass_stale_color_attachment_no_validation) {
+    setup(&(sg_desc){ .disable_validation = true });
+    sg_image color_img = sg_make_image(&(sg_image_desc){
+        .usage.color_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_RGBA8,
+    });
+    sg_image depth_img = sg_make_image(&(sg_image_desc){
+        .usage.depth_stencil_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_DEPTH,
+    });
+    sg_view color_view = sg_make_view(&(sg_view_desc){
+        .color_attachment.image = color_img,
+    });
+    sg_view depth_view = sg_make_view(&(sg_view_desc){
+        .depth_stencil_attachment.image = depth_img,
+    });
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 0);
+
+    sg_destroy_view(color_view);
+    sg_destroy_image(color_img);
+    sg_image new_color_img = sg_make_image(&(sg_image_desc){
+        .usage.color_attachment = true,
+        .width = 8,
+        .height = 8,
+        .pixel_format = SG_PIXELFORMAT_RGBA8,
+    });
+    sg_view new_color_view = sg_make_view(&(sg_view_desc){
+        .color_attachment.image = new_color_img,
+    });
+    T((color_view.id & 0xFFFF) == (new_color_view.id & 0xFFFF));
+    T(color_view.id != new_color_view.id);
+
+    // the stale color handle is rejected with the same error code as depth
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 1);
+    T(log_items[0] == SG_LOGITEM_BEGINPASS_ATTACHMENTS_ALIVE);
+
+    // the new handle works
+    reset_log_items();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { new_color_view }, .depth_stencil = depth_view },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(num_log_called == 0);
+
+    sg_destroy_view(new_color_view);
+    sg_destroy_image(new_color_img);
+    sg_destroy_view(depth_view);
+    sg_destroy_image(depth_img);
+    sg_shutdown();
+}
+
 // write-transient deferred-validation tests
 
 static sg_pipeline create_write_transient_test_pipeline(void) {

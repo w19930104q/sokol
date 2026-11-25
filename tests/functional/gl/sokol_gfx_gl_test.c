@@ -1097,6 +1097,80 @@ UTEST(sokol_gfx_gl, offscreen_pass_binds_persistent_framebuffer) {
     teardown();
 }
 
+// a stale depth-stencil attachment handle is rejected before any backend
+// framebuffer call is made, even with the validation layer disabled
+UTEST(sokol_gfx_gl, offscreen_pass_stale_depth_attachment_rejected) {
+    if (sg_isvalid()) {
+        sg_shutdown();
+        gl_mock_shutdown();
+    }
+    reset_log();
+    gl_mock_setup();
+    sg_setup(&(sg_desc){
+        .environment.defaults = {
+            .color_format = SG_PIXELFORMAT_RGBA8,
+            .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
+            .sample_count = 1,
+        },
+        .logger.func = capture_log,
+        .disable_validation = true,
+    });
+    sg_image color_img = sg_make_image(&(sg_image_desc){
+        .width = 8, .height = 8, .pixel_format = SG_PIXELFORMAT_RGBA8,
+        .usage.color_attachment = true,
+    });
+    sg_image depth_img = sg_make_image(&(sg_image_desc){
+        .width = 8, .height = 8, .pixel_format = SG_PIXELFORMAT_DEPTH,
+        .usage.depth_stencil_attachment = true,
+    });
+    sg_view color_v = sg_make_view(&(sg_view_desc){ .color_attachment.image = color_img });
+    sg_view depth_v = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = depth_img });
+    // a first valid offscreen pass
+    gl_mock_clear_calls();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_v }, .depth_stencil = depth_v },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(no_errors());
+    T(gl_mock_count_calls(GL_MOCK_FUNC_glBindFramebuffer) >= 1);
+    // recreate the depth attachment into the same pool slot with a new generation
+    sg_destroy_view(depth_v);
+    sg_destroy_image(depth_img);
+    sg_image new_depth_img = sg_make_image(&(sg_image_desc){
+        .width = 8, .height = 8, .pixel_format = SG_PIXELFORMAT_DEPTH,
+        .usage.depth_stencil_attachment = true,
+    });
+    sg_view new_depth_v = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = new_depth_img });
+    T((depth_v.id & 0xFFFF) == (new_depth_v.id & 0xFFFF));
+    T(depth_v.id != new_depth_v.id);
+    // the stale handle is rejected with no backend framebuffer call
+    reset_log();
+    gl_mock_clear_calls();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_v }, .depth_stencil = depth_v },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(logged(SG_LOGITEM_BEGINPASS_ATTACHMENTS_ALIVE));
+    T(gl_mock_count_calls(GL_MOCK_FUNC_glBindFramebuffer) == 0);
+    // the new handle starts a backend pass again
+    reset_log();
+    gl_mock_clear_calls();
+    sg_begin_pass(&(sg_pass){
+        .attachments = { .colors = { color_v }, .depth_stencil = new_depth_v },
+    });
+    sg_end_pass();
+    sg_commit();
+    T(no_errors());
+    T(gl_mock_count_calls(GL_MOCK_FUNC_glBindFramebuffer) >= 1);
+    sg_destroy_view(new_depth_v);
+    sg_destroy_image(new_depth_img);
+    sg_destroy_view(color_v);
+    sg_destroy_image(color_img);
+    teardown();
+}
+
 UTEST(sokol_gfx_gl, offscreen_msaa_pass_blit_resolves) {
     setup();
     if (sg_query_features().msaa_texture_bindings) {
